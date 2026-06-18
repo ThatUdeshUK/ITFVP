@@ -1,0 +1,19 @@
+[project]
+name = "ITFVP"
+version = "0.1.0"
+description = "ITFVP (Image to Traction Force Visualization Pipeline): stage-drift correction, PIV displacement fields, and FTTC traction stress visualisation from fluorescence microscopy time-series."
+readme = "README.md"
+requires-python = ">=3.14"
+authors = [
+    { email = "mail@udesh.xyz" },
+]
+keywords = ["traction force microscopy", "PIV", "FTTC", "biophysics", "cell mechanics"]
+dependencies = [
+    "imagecodecs>=2026.5.10",
+    "imageio[ffmpeg]>=2.37.3",
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.6",
+    "openpiv>=0.25.4",
+    "pillow>=12.2.0",
+    "tifffile>=2026.5.15",
+]
