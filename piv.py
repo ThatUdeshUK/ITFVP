@@ -42,8 +42,17 @@ SMOOTH_WINDOW = 3
 # frame. Coarser windows average over more texture per interrogation area,
 # giving stable estimates that stay near zero in the static background and
 # only stand out where coherent motion actually occurs.
-WINDOW_SIZES = (64, 32, 16)
-OVERLAPS     = (32, 16, 8)
+WINDOW_SIZES = (128, 64, 32)
+OVERLAPS     = (64, 32, 16)
+
+# Gapped comparisons span much larger time intervals (hours vs. minutes), so
+# beads/cells can displace 35–100 px relative to the reference frame — well
+# beyond what a 64 px first-pass window can reliably detect (reliable range ≈
+# ±window/2 = ±32 px). A 256 px first pass extends that range to ≈ ±128 px,
+# then each subsequent pass halves the window for finer resolution, finishing
+# at the same 16 px grid as the dense-series settings.
+GAPPED_WINDOW_SIZES = (256, 128, 64, 32, 16)
+GAPPED_OVERLAPS     = (128, 64, 32, 16, 8)
 
 
 def make_settings() -> windef.PIVSettings:
@@ -78,11 +87,36 @@ def make_settings() -> windef.PIVSettings:
     return s
 
 
+def make_gapped_settings() -> windef.PIVSettings:
+    s = make_settings()
+    s.windowsizes    = GAPPED_WINDOW_SIZES
+    s.overlap        = GAPPED_OVERLAPS
+    s.num_iterations = len(GAPPED_WINDOW_SIZES)
+    # Gapped comparisons span hours, so the displacement field is spatially
+    # heterogeneous: the absolute-pixel threshold (median_normalized=False)
+    # inherited from make_settings flags boundary regions where neighboring
+    # vectors legitimately differ by >2 px — cascading into all vectors being
+    # replaced by localmean≈0. The normalized test (Westerweel & Scarano) uses
+    # local residual magnitude as the scale, making threshold=3.0 unitless and
+    # robust to the 20-40 px displacements typical of multi-hour gapped frames.
+    s.median_normalized = True
+    s.median_threshold  = 3
+    return s
+
+
 def load_files(data_dir: Path) -> list[Path]:
-    files = sorted(data_dir.glob("Image_T*.tif"))
+    files = sorted(data_dir.glob("*.tif"))
     if not files:
-        raise FileNotFoundError(f"No Image_T*.tif files found in {data_dir}")
+        raise FileNotFoundError(f"*.tif files found in {data_dir}")
     return files
+
+
+def piv_fields_filename(non_cumulative: bool) -> str:
+    # Frame-to-frame and baseline-referenced displacement are physically
+    # different fields (incremental vs. net) despite having the same array
+    # shape, so they're cached under different names — reusing one cache
+    # for the other mode would silently produce wrong results.
+    return "piv_fields_baseline.npz" if non_cumulative else "piv_fields.npz"
 
 
 def to_gray(frame: np.ndarray) -> np.ndarray:
@@ -177,6 +211,17 @@ def parse_args() -> argparse.Namespace:
              "when the cache file exists).",
     )
     parser.set_defaults(force=None)
+    parser.add_argument(
+        "--non-cumulative", action="store_true",
+        help="Compute each frame's displacement directly against the first "
+             "frame (baseline) instead of frame-to-frame consecutive pairs. "
+             "Frame-to-frame (default) gives the incremental change between "
+             "neighboring frames, which must be summed over time to see net "
+             "motion, accumulating per-step measurement error along the way; "
+             "this mode gives that net displacement directly instead. Cached "
+             "separately (results/piv_fields_baseline.npz) from the default "
+             "frame-to-frame result.",
+    )
     return parser.parse_args()
 
 
@@ -207,10 +252,19 @@ def ensure_cache(
 
 def compute_and_export_fields(
     files: list[Path], stems: list[str], gray_dir: Path, results_dir: Path,
-    fields_path: Path, fps: int,
+    fields_path: Path, fps: int, non_cumulative: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Run the (slow) PIV pass once and export the raw per-pair fields to
-    fields_path so later runs can re-render without recomputing PIV."""
+    fields_path so later runs can re-render without recomputing PIV.
+
+    Default mode pairs each frame with its immediate successor, giving the
+    incremental (frame-to-frame) displacement — genuine motion trends only
+    emerge once those increments are summed over time, and per-step
+    measurement noise accumulates along with them. non_cumulative instead
+    pairs every frame directly with the first frame (baseline), giving the
+    net displacement since the start directly, with no error accumulation
+    across steps (see fttc_traction's docstring in traction.py for how this
+    choice propagates into absolute vs. incremental traction stress)."""
     frames = [tifffile.imread(f) for f in files]
     h, w = frames[0].shape[:2]
     print(f"Loaded {len(frames)} frames ({w}x{h})")
@@ -226,12 +280,14 @@ def compute_and_export_fields(
 
     settings = make_settings()
 
-    print("Computing PIV fields (windef multi-pass) ...")
+    mode = "each frame vs. baseline frame" if non_cumulative else "frame-to-frame"
+    print(f"Computing PIV fields (windef multi-pass, {mode}) ...")
     n_pairs = len(gray_frames) - 1
     x = y = None
     us, vs = [], []
     for i in range(n_pairs):
-        x, y, u, v, flags = compute_piv(gray_frames[i], gray_frames[i + 1], settings)
+        frame_a = gray_frames[0] if non_cumulative else gray_frames[i]
+        x, y, u, v, flags = compute_piv(frame_a, gray_frames[i + 1], settings)
         us.append(u)
         vs.append(v)
         print(f"  {i + 1}/{n_pairs}", end="\r")
@@ -249,8 +305,8 @@ def main() -> None:
     data_dir    = args.data_dir
     results_dir = Path("results")
     gray_dir    = results_dir / "gray"
-    piv_dir     = results_dir / "piv"
-    fields_path = results_dir / "piv_fields.npz"
+    piv_dir     = results_dir / ("piv_baseline" if args.non_cumulative else "piv")
+    fields_path = results_dir / piv_fields_filename(args.non_cumulative)
     fps         = 8
 
     gray_dir.mkdir(parents=True, exist_ok=True)
@@ -260,7 +316,7 @@ def main() -> None:
     stems = [f.stem for f in files]
     n_pairs = len(files) - 1
 
-    # --force always recomputes; --use-cache always reuses piv_fields.npz;
+    # --force always recomputes; --use-cache always reuses the cache file;
     # with neither flag, reuse it automatically if it already exists.
     use_cache = fields_path.exists() if args.force is None else not args.force
 
@@ -275,7 +331,8 @@ def main() -> None:
         x, y, u_raw, v_raw = cached["x"], cached["y"], cached["u"], cached["v"]
     else:
         x, y, u_raw, v_raw = compute_and_export_fields(
-            files, stems, gray_dir, results_dir, fields_path, fps
+            files, stems, gray_dir, results_dir, fields_path, fps,
+            non_cumulative=args.non_cumulative,
         )
 
     print(f"Smoothing displacement fields over time (window={SMOOTH_WINDOW}) ...")
@@ -289,17 +346,17 @@ def main() -> None:
     vmin, vmax = 0.0, float(np.percentile(magnitude, 99))
     print(f"Color scale: {vmin:.2f}-{vmax:.2f} px (rainbow)")
 
-    print("Rendering timelapse_piv.mp4 ...")
+    piv_video = results_dir / ("timelapse_piv_baseline.mp4" if args.non_cumulative else "timelapse_piv.mp4")
+    print(f"Rendering {piv_video.name} ...")
     piv_frames = []
     for i in range(n_pairs):
         rendered = render_piv_frame(files[i], x, y, u_smooth[i], v_smooth[i], vmin, vmax)
         piv_frames.append(rendered)
-        stem_a, stem_b = stems[i], stems[i + 1]
+        stem_a = stems[0] if args.non_cumulative else stems[i]
+        stem_b = stems[i + 1]
         iio.imwrite(piv_dir / f"{stem_a}__{stem_b}.png", rendered)
         print(f"  {i + 1}/{n_pairs}", end="\r")
     print()
-
-    piv_video = results_dir / "timelapse_piv.mp4"
     save_video(piv_frames, piv_video, fps=fps)
     print(f"Done — {piv_video}")
 

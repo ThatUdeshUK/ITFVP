@@ -10,7 +10,7 @@ from scipy.ndimage import gaussian_filter
 from skimage.registration import phase_cross_correlation
 
 from piv_fttc import render_combined_frame
-from piv import compute_piv, make_settings
+from piv import compute_piv, make_gapped_settings
 from piv import to_gray as to_gray_uint8
 from stabilize import UPSAMPLE_FACTOR, apply_shift, common_crop
 from stabilize import to_gray as to_gray_float
@@ -22,7 +22,60 @@ from traction import (
     fttc_traction,
 )
 
-FRAME_INDEX_RE = re.compile(r"_T(\d+)_")
+FRAME_INDEX_RE = re.compile(r"(\d+)")
+
+
+def _block_mean(arr: np.ndarray, n: int) -> np.ndarray:
+    H, W = arr.shape
+    H_trim = (H // n) * n
+    W_trim = (W // n) * n
+    return (
+        arr[:H_trim, :W_trim]
+        .reshape(H_trim // n, n, W_trim // n, n)
+        .mean(axis=(1, 3))
+    )
+
+
+def export_traction_csv(
+    path: Path,
+    x: np.ndarray,
+    y: np.ndarray,
+    tx: np.ndarray,
+    ty: np.ndarray,
+    grid_mean: int,
+    px_to_um: float | None = None,
+) -> None:
+    if grid_mean > 1:
+        x, y, tx, ty = (_block_mean(a, grid_mean) for a in (x, y, tx, ty))
+    # Traction stress (Pa) is unit-independent of pixel size (see
+    # traction.py's fttc_traction) — only the x, y positions need
+    # rescaling to micrometers.
+    if px_to_um is not None:
+        x, y = x * px_to_um, y * px_to_um
+    header = "x_um,y_um,stress" if px_to_um is not None else "x,y,stress"
+    rows = np.column_stack([x.ravel(), y.ravel(), np.sqrt(tx**2 + ty**2).ravel()])
+    np.savetxt(path, rows, delimiter=",", header=header, comments="")
+
+
+def export_displacement_csv(
+    path: Path,
+    x: np.ndarray,
+    y: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    grid_mean: int,
+    px_to_um: float | None = None,
+) -> None:
+    if grid_mean > 1:
+        x, y, u, v = (_block_mean(a, grid_mean) for a in (x, y, u, v))
+    if px_to_um is not None:
+        x, y, u, v = (a * px_to_um for a in (x, y, u, v))
+    magnitude = np.sqrt(u**2 + v**2)
+    direction = np.degrees(np.arctan2(v, u))
+    header = ("x_um,y_um,magnitude_um,direction" if px_to_um is not None
+               else "x,y,magnitude,direction")
+    rows = np.column_stack([x.ravel(), y.ravel(), magnitude.ravel(), direction.ravel()])
+    np.savetxt(path, rows, delimiter=",", header=header, comments="")
 
 # Acquisition interval, used only to label each pair's elapsed time —
 # matches the dense time series (10 minutes/frame).
@@ -37,9 +90,9 @@ def frame_index(path: Path) -> int:
 
 
 def find_frames(gapped_dir: Path, channel: str) -> dict[int, Path]:
-    files = sorted(gapped_dir.glob(f"Image_T*_{channel}.tif"))
+    files = sorted(gapped_dir.glob(f"*.tif"))
     if not files:
-        raise FileNotFoundError(f"No Image_T*_{channel}.tif files found in {gapped_dir}")
+        raise FileNotFoundError(f"No *.tif files found in {gapped_dir}")
     return {frame_index(f): f for f in files}
 
 
@@ -83,7 +136,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--gapped-dir", type=Path, default=Path("gapped"),
-        help="Directory of sparsely time-spaced Image_T*_CH4.tif "
+        help="Directory of sparsely time-spaced *.tif "
              "(microscope) / Image_T*_CH1.tif (brightfield) snapshots "
              "(default: gapped).",
     )
@@ -100,10 +153,36 @@ def parse_args() -> argparse.Namespace:
         help="Omit the FTTC traction-stress heatmap from the rendering.",
     )
     parser.add_argument(
+        "--transparent", action="store_true",
+        help="For renders without the background frame (--no-background, or "
+             "the backgroundless combinations under --all), use a "
+             "transparent canvas instead of the default opaque black/white "
+             "one, and save PNGs with an alpha channel. Has no effect on "
+             "renders that include the background frame.",
+    )
+    parser.add_argument(
         "--all", action="store_true",
         help="Render all 7 non-empty combinations of background/PIV/traction "
              "layers (overrides --no-background/--no-piv/--no-traction), each "
-             "into its own results/gapped/piv_fttc_<layers>/ directory.",
+             "into its own <output-dir>/piv_fttc_<layers>/ directory.",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("results/gapped"),
+        metavar="DIR",
+        help="Root directory for all outputs (default: results/gapped).",
+    )
+    parser.add_argument(
+        "--grid-mean", type=int, default=1, metavar="N",
+        help="Before writing the traction CSV, average every N×N block of PIV "
+             "grid cells into a single point (default: 1, no averaging).",
+    )
+    parser.add_argument(
+        "--px-to-um", type=float, default=None, metavar="SCALE",
+        help="Pixel-to-micrometer conversion factor (micrometers per pixel). "
+             "If given, displacement and spatial axes in the rendered "
+             "output and exported CSVs are shown in micrometers instead of "
+             "pixels (traction stress in Pa is unaffected — it's already "
+             "unit-independent of pixel size). Default: pixels.",
     )
     return parser.parse_args()
 
@@ -129,7 +208,7 @@ def main() -> None:
     need_traction = any(traction for _, _, traction in combos)
 
     gapped_dir = args.gapped_dir
-    results_dir = Path("results/gapped")
+    results_dir = args.output_dir
     stabilized_dir = results_dir / "stabilized"
     stabilized_dir.mkdir(parents=True, exist_ok=True)
 
@@ -155,8 +234,6 @@ def main() -> None:
     ref_micro = tifffile.imread(micro_files[ref_idx])
     ref_bf = tifffile.imread(bf_files[ref_idx])
     print(f"Reference: T{ref_idx:04d} ({len(target_idxs)} target frame(s))")
-
-    settings = make_settings()
 
     # Pass 1: co-register and compute PIV/traction for every target frame,
     # so the color/arrow scales below can be fixed across all of them —
@@ -193,11 +270,19 @@ def main() -> None:
 
         x = y = u = v = tx = ty = None
 
+        exports_dir = results_dir / "exports"
+        pair_tag = f"T{ref_idx:04d}_T{tgt_idx:04d}_{elapsed_h:.1f}h"
+
         if need_piv:
             print("  Computing PIV displacement (windef multi-pass) ...")
             gray_ref = to_gray_uint8(ref_micro_c)
             gray_tgt = to_gray_uint8(tgt_micro_c)
-            x, y, u, v, flags = compute_piv(gray_ref, gray_tgt, settings)
+            x, y, u, v, flags = compute_piv(gray_ref, gray_tgt, make_gapped_settings())
+
+            exports_dir.mkdir(parents=True, exist_ok=True)
+            disp_path = exports_dir / f"{pair_tag}_displacement.csv"
+            export_displacement_csv(disp_path, x, y, u, v, args.grid_mean, args.px_to_um)
+            print(f"  Displacement CSV -> {disp_path}")
 
         if need_traction:
             print(f"  Low-pass filtering displacement (sigma={DISPLACEMENT_SMOOTH_SIGMA} grid "
@@ -209,6 +294,11 @@ def main() -> None:
             mesh_y_px = y[1, 0] - y[0, 0]
             tx, ty = fttc_traction(u_lp, v_lp, mesh_x_px, mesh_y_px, YOUNGS_MODULUS, POISSON_RATIO)
 
+            exports_dir.mkdir(parents=True, exist_ok=True)
+            traction_path = exports_dir / f"{pair_tag}_traction.csv"
+            export_traction_csv(traction_path, x, y, tx, ty, args.grid_mean, args.px_to_um)
+            print(f"  Traction CSV -> {traction_path}")
+
         pairs.append(dict(
             tgt_idx=tgt_idx, elapsed_h=elapsed_h,
             ref_micro_path=ref_micro_path, tgt_bf_path=tgt_bf_path,
@@ -218,16 +308,18 @@ def main() -> None:
     # Fixed scales across all target frames (99th percentile, floored at
     # TRACTION_VMIN_PERCENTILE for stress) so colors/arrow lengths are
     # directly comparable between e.g. the 2h and 24h renderings.
+    disp_unit = "μm" if args.px_to_um is not None else "px"
     disp_vmax = stress_vmin = stress_vmax = 0.0
     if need_piv:
         all_disp = np.concatenate([np.sqrt(p["u"] ** 2 + p["v"] ** 2).ravel() for p in pairs])
         disp_vmax = float(np.percentile(all_disp, 99))
-        print(f"\nDisplacement scale: 0-{disp_vmax:.2f} px (arrow key)")
+        disp_vmax_display = disp_vmax * args.px_to_um if args.px_to_um is not None else disp_vmax
+        print(f"\nDisplacement scale: 0-{disp_vmax_display:.2f} {disp_unit} (arrow key)")
     if need_traction:
         all_stress = np.concatenate([np.sqrt(p["tx"] ** 2 + p["ty"] ** 2).ravel() for p in pairs])
         stress_vmin = float(np.percentile(all_stress, TRACTION_VMIN_PERCENTILE))
         stress_vmax = float(np.percentile(all_stress, 99))
-        print(f"Traction scale: {stress_vmin:.2f}-{stress_vmax:.2f} Pa (rainbow, "
+        print(f"Traction scale: {stress_vmin:.2f}-{stress_vmax:.2f} Pa (black→red, "
               f"floored at p{TRACTION_VMIN_PERCENTILE})")
 
     # Pass 2: render every target frame against the shared scales above.
@@ -244,6 +336,8 @@ def main() -> None:
                 disp_vmax, stress_vmin, stress_vmax,
                 show_background, show_piv, show_traction,
                 color_piv_by_magnitude=not show_traction,
+                px_to_um=args.px_to_um,
+                transparent=args.transparent,
             )
             out_path = (out_dirs[(show_background, show_piv, show_traction)]
                         / f"T{ref_idx:04d}__T{p['tgt_idx']:04d}_{p['elapsed_h']:.1f}h.png")

@@ -58,12 +58,6 @@ def fttc_traction(
     traction stress between those two frames (and the per-frame increments
     sum to the absolute field).
     """
-    # The DFT treats the field as periodic, but the real displacement field
-    # isn't — its left/right and top/bottom edges don't match up. That sharp
-    # seam looks like high-frequency content to the FFT and gets amplified
-    # into bright fake traction along the borders. Mirror-pad before
-    # transforming (removing the seam) and crop back to the original grid
-    # afterwards — a standard remedy for FFT edge/wraparound artifacts.
     ny, nx = u_px.shape
     pad_y, pad_x = ny // 4, nx // 4
     u_pad = np.pad(u_px, ((pad_y, pad_y), (pad_x, pad_x)), mode="reflect")
