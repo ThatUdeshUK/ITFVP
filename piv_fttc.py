@@ -300,6 +300,29 @@ def parse_args() -> argparse.Namespace:
              "stress in Pa is unaffected — it's already unit-independent "
              "of pixel size). Default: pixels.",
     )
+    parser.add_argument(
+        "--disp-vmax", type=float, default=None, metavar="VALUE",
+        help="Explicit displacement scale max (arrow length/colorbar), in "
+             "the same units as the rendered output (μm if --px-to-um is "
+             "given, otherwise px). Overrides the automatic 99th-percentile "
+             "scale — set this to the same value across runs so "
+             "displacement scales are directly comparable. Default: "
+             "automatic.",
+    )
+    parser.add_argument(
+        "--stress-vmin", type=float, default=None, metavar="PA",
+        help="Explicit traction color-scale minimum, in Pa. Overrides the "
+             f"automatic p{TRACTION_VMIN_PERCENTILE} floor — set this to "
+             "the same value across runs so traction scales are directly "
+             "comparable. Default: automatic.",
+    )
+    parser.add_argument(
+        "--stress-vmax", type=float, default=None, metavar="PA",
+        help="Explicit traction color-scale maximum, in Pa. Overrides the "
+             "automatic 99th-percentile ceiling — set this to the same "
+             "value across runs so traction scales are directly "
+             "comparable. Default: automatic.",
+    )
     return parser.parse_args()
 
 
@@ -356,6 +379,12 @@ def main() -> None:
         u_smooth = uniform_filter1d(u_raw, size=SMOOTH_WINDOW, axis=0, mode="nearest")
         v_smooth = uniform_filter1d(v_raw, size=SMOOTH_WINDOW, axis=0, mode="nearest")
         disp_vmax = float(np.percentile(np.sqrt(u_smooth ** 2 + v_smooth ** 2), 99))
+        if args.disp_vmax is not None:
+            # render_combined_frame expects disp_vmax in the same (raw px)
+            # units it converts internally, so an explicit --disp-vmax
+            # (given in display units) must be converted back.
+            disp_vmax = (args.disp_vmax if args.px_to_um is None
+                         else args.disp_vmax / args.px_to_um)
 
     tx_smooth = ty_smooth = None
     stress_vmin = stress_vmax = 0.0
@@ -387,15 +416,22 @@ def main() -> None:
         stress_magnitude_all = np.sqrt(tx_smooth ** 2 + ty_smooth ** 2)
         stress_vmin = float(np.percentile(stress_magnitude_all, TRACTION_VMIN_PERCENTILE))
         stress_vmax = float(np.percentile(stress_magnitude_all, 99))
+        if args.stress_vmin is not None:
+            stress_vmin = args.stress_vmin
+        if args.stress_vmax is not None:
+            stress_vmax = args.stress_vmax
 
     disp_unit = "μm" if args.px_to_um is not None else "px"
     if show_piv:
         disp_vmax_display = disp_vmax * args.px_to_um if args.px_to_um is not None else disp_vmax
-        print(f"Displacement scale: 0-{disp_vmax_display:.2f} {disp_unit} (arrow key)")
+        disp_scale_source = "manual" if args.disp_vmax is not None else "automatic, p99"
+        print(f"Displacement scale: 0-{disp_vmax_display:.2f} {disp_unit} (arrow key, {disp_scale_source})")
     if show_traction:
         scale_label = "Traction" if args.non_cumulative else "Traction-change"
+        stress_scale_source = ("manual" if args.stress_vmin is not None or args.stress_vmax is not None
+                                else f"automatic, floored at p{TRACTION_VMIN_PERCENTILE}")
         print(f"{scale_label} color scale: {stress_vmin:.2f}-{stress_vmax:.2f} Pa "
-              f"(black→red, floored at p{TRACTION_VMIN_PERCENTILE})")
+              f"(black→red, {stress_scale_source})")
         if args.cutoff is not None:
             print(f"{scale_label} cutoff: {args.cutoff:.2f} Pa (below this, transparent)")
 

@@ -184,6 +184,29 @@ def parse_args() -> argparse.Namespace:
              "pixels (traction stress in Pa is unaffected — it's already "
              "unit-independent of pixel size). Default: pixels.",
     )
+    parser.add_argument(
+        "--disp-vmax", type=float, default=None, metavar="VALUE",
+        help="Explicit displacement scale max (arrow length/colorbar), in "
+             "the same units as the rendered output (μm if --px-to-um is "
+             "given, otherwise px). Overrides the automatic 99th-percentile "
+             "scale — set this to the same value across runs so "
+             "displacement scales are directly comparable. Default: "
+             "automatic.",
+    )
+    parser.add_argument(
+        "--stress-vmin", type=float, default=None, metavar="PA",
+        help="Explicit traction color-scale minimum, in Pa. Overrides the "
+             f"automatic p{TRACTION_VMIN_PERCENTILE} floor — set this to "
+             "the same value across runs so traction scales are directly "
+             "comparable. Default: automatic.",
+    )
+    parser.add_argument(
+        "--stress-vmax", type=float, default=None, metavar="PA",
+        help="Explicit traction color-scale maximum, in Pa. Overrides the "
+             "automatic 99th-percentile ceiling — set this to the same "
+             "value across runs so traction scales are directly "
+             "comparable. Default: automatic.",
+    )
     return parser.parse_args()
 
 
@@ -315,14 +338,27 @@ def main() -> None:
     if need_piv:
         all_disp = np.concatenate([np.sqrt(p["u"] ** 2 + p["v"] ** 2).ravel() for p in pairs])
         disp_vmax = float(np.percentile(all_disp, 99))
+        if args.disp_vmax is not None:
+            # render_combined_frame expects disp_vmax in the same (raw px)
+            # units it converts internally, so an explicit --disp-vmax
+            # (given in display units) must be converted back.
+            disp_vmax = (args.disp_vmax if args.px_to_um is None
+                         else args.disp_vmax / args.px_to_um)
         disp_vmax_display = disp_vmax * args.px_to_um if args.px_to_um is not None else disp_vmax
-        print(f"\nDisplacement scale: 0-{disp_vmax_display:.2f} {disp_unit} (arrow key)")
+        disp_scale_source = "manual" if args.disp_vmax is not None else "automatic, p99"
+        print(f"\nDisplacement scale: 0-{disp_vmax_display:.2f} {disp_unit} (arrow key, {disp_scale_source})")
     if need_traction:
         all_stress = np.concatenate([np.sqrt(p["tx"] ** 2 + p["ty"] ** 2).ravel() for p in pairs])
         stress_vmin = float(np.percentile(all_stress, TRACTION_VMIN_PERCENTILE))
         stress_vmax = float(np.percentile(all_stress, 99))
+        if args.stress_vmin is not None:
+            stress_vmin = args.stress_vmin
+        if args.stress_vmax is not None:
+            stress_vmax = args.stress_vmax
+        stress_scale_source = ("manual" if args.stress_vmin is not None or args.stress_vmax is not None
+                                else f"automatic, floored at p{TRACTION_VMIN_PERCENTILE}")
         print(f"Traction scale: {stress_vmin:.2f}-{stress_vmax:.2f} Pa (black→red, "
-              f"floored at p{TRACTION_VMIN_PERCENTILE})")
+              f"{stress_scale_source})")
 
     # Pass 2: render every target frame against the shared scales above.
     for p in pairs:
