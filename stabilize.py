@@ -123,13 +123,13 @@ def parse_args() -> argparse.Namespace:
                     "render background later in the pipeline."
     )
     parser.add_argument(
-        "--microscope-dir", type=Path, default=Path("data/CH4"),
+        "--microscope-dir", type=Path,
         help="Raw microscope-channel TIFF directory — drift is estimated "
              "from these frames, and this is the data PIV/traction are "
              "computed from downstream (default: data/CH4).",
     )
     parser.add_argument(
-        "--brightfield-dir", type=Path, default=Path("data/CH1"),
+        "--brightfield-dir", type=Path,
         help="Raw brightfield TIFF directory — co-registered to the "
              "microscope channel here, but otherwise only used as the "
              "render background downstream (default: data/CH1).",
@@ -145,13 +145,22 @@ def main() -> None:
     reset_output_dir(micro_out_dir)
     reset_output_dir(bf_out_dir)
 
-    micro_files, bf_files = match_frames(
-        load_files(args.microscope_dir), load_files(args.brightfield_dir)
-    )
+    micro_files, bf_files = [], []
+    if args.microscope_dir:
+        micro_files = load_files(args.microscope_dir)
+
+    if args.brightfield_dir:
+        bf_files = load_files(args.microscope_dir)
+
+    has_both = args.microscope_dir and args.brightfield_dir
+    if has_both:
+        micro_files, bf_files = match_frames(
+            load_files(args.microscope_dir), load_files(args.brightfield_dir)
+        )
 
     micro_frames = [tifffile.imread(f) for f in micro_files]
     bf_frames = [tifffile.imread(f) for f in bf_files]
-    if bf_frames[0].shape[:2] != micro_frames[0].shape[:2]:
+    if has_both and bf_frames[0].shape[:2] != micro_frames[0].shape[:2]:
         raise ValueError(
             f"Microscope and brightfield frames have different (H, W) — "
             f"{micro_frames[0].shape[:2]} vs {bf_frames[0].shape[:2]} — "
@@ -174,15 +183,24 @@ def main() -> None:
     cw, ch = col_crop.stop - col_crop.start, row_crop.stop - row_crop.start
     print(f"Common valid region after correction: {cw}x{ch} (rows {row_crop}, cols {col_crop})")
 
-    print(f"Applying the microscope channel's drift correction to both channels "
-          f"and writing to {micro_out_dir}/ and {bf_out_dir}/ ...")
-    for micro_frame, micro_file, bf_frame, bf_file, shift in zip(
-        micro_frames, micro_files, bf_frames, bf_files, shifts
-    ):
-        micro_cropped = apply_shift(micro_frame, shift)[row_crop, col_crop]
-        bf_cropped = apply_shift(bf_frame, shift)[row_crop, col_crop]
-        tifffile.imwrite(micro_out_dir / micro_file.name, micro_cropped)
-        tifffile.imwrite(bf_out_dir / bf_file.name, bf_cropped)
+    if has_both:
+        print(f"Applying the microscope channel's drift correction to both channels "
+              f"and writing to {micro_out_dir}/ and {bf_out_dir}/ ...")
+        for micro_frame, micro_file, bf_frame, bf_file, shift in zip(
+            micro_frames, micro_files, bf_frames, bf_files, shifts
+        ):
+            micro_cropped = apply_shift(micro_frame, shift)[row_crop, col_crop]
+            bf_cropped = apply_shift(bf_frame, shift)[row_crop, col_crop]
+            tifffile.imwrite(micro_out_dir / micro_file.name, micro_cropped)
+            tifffile.imwrite(bf_out_dir / bf_file.name, bf_cropped)
+    else:
+        print(f"Applying the microscope channel's drift correction "
+              f"and writing to {micro_out_dir}/ ...")
+        for micro_frame, micro_file, shift in zip(
+            micro_frames, micro_files, shifts
+        ):
+            micro_cropped = apply_shift(micro_frame, shift)[row_crop, col_crop]
+            tifffile.imwrite(micro_out_dir / micro_file.name, micro_cropped)
 
     print(f"Done — {len(micro_files)} co-registered frame pairs ({cw}x{ch}) "
           f"in {micro_out_dir}/ and {bf_out_dir}/")

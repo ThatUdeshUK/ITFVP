@@ -277,7 +277,9 @@ def main() -> None:
             print("  Computing PIV displacement (windef multi-pass) ...")
             gray_ref = to_gray_uint8(ref_micro_c)
             gray_tgt = to_gray_uint8(tgt_micro_c)
-            x, y, u, v, flags = compute_piv(gray_ref, gray_tgt, make_gapped_settings())
+            x, y, u, v, flags = compute_piv(
+                gray_ref, gray_tgt, make_gapped_settings(gray_ref.shape[:2])
+            )
 
             exports_dir.mkdir(parents=True, exist_ok=True)
             disp_path = exports_dir / f"{pair_tag}_displacement.csv"
