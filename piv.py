@@ -87,29 +87,10 @@ def make_settings() -> windef.PIVSettings:
     s.save_plot      = False
     return s
 
-
-def _fit_gapped_windows(image_shape: tuple[int, int]) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    sizes, overlaps = [], []
-    n = len(GAPPED_WINDOW_SIZES)
-    for i, (w, o) in enumerate(zip(GAPPED_WINDOW_SIZES, GAPPED_OVERLAPS)):
-        is_last = i == n - 1
-        rows, cols = get_field_shape(image_shape, w, o)
-        if not is_last and (rows < 4 or cols < 4):
-            continue
-        sizes.append(w)
-        overlaps.append(o)
-    if not sizes:
-        sizes, overlaps = [GAPPED_WINDOW_SIZES[-1]], [GAPPED_OVERLAPS[-1]]
-    return tuple(sizes), tuple(overlaps)
-
-
 def make_gapped_settings(image_shape: tuple[int, int] | None = None) -> windef.PIVSettings:
     s = make_settings()
-    if image_shape is None:
-        s.windowsizes = GAPPED_WINDOW_SIZES
-        s.overlap     = GAPPED_OVERLAPS
-    else:
-        s.windowsizes, s.overlap = _fit_gapped_windows(image_shape)
+    s.windowsizes = GAPPED_WINDOW_SIZES
+    s.overlap     = GAPPED_OVERLAPS
     s.num_iterations = len(s.windowsizes)
     # Gapped comparisons span hours, so the displacement field is spatially
     # heterogeneous: the absolute-pixel threshold (median_normalized=False)
