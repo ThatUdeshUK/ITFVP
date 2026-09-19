@@ -9,12 +9,12 @@ import tifffile
 from scipy.ndimage import gaussian_filter
 from skimage.registration import phase_cross_correlation
 
-from piv_fttc import render_combined_frame
-from piv import compute_piv, make_gapped_settings
-from piv import to_gray as to_gray_uint8
-from stabilize import UPSAMPLE_FACTOR, apply_shift, common_crop
-from stabilize import to_gray as to_gray_float
-from traction import (
+from lib.piv_fttc import render_combined_frame
+from lib.piv import compute_piv, make_gapped_settings
+from lib.piv import to_gray as to_gray_uint8
+from lib.stabilize import UPSAMPLE_FACTOR, apply_shift, common_crop
+from lib.stabilize import to_gray as to_gray_float
+from lib.traction import (
     DISPLACEMENT_SMOOTH_SIGMA,
     POISSON_RATIO,
     TRACTION_VMIN_PERCENTILE,

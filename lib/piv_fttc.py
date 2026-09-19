@@ -7,7 +7,6 @@ import imageio.v3 as iio
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 from scipy.ndimage import gaussian_filter, uniform_filter1d
 
@@ -18,14 +17,8 @@ DPI = 300
 # moving the black/white points set by the percentile stretch.
 BACKGROUND_GAMMA = 0.45
 
-# Black at the floor (below-threshold noise), then rainbow spectrum up to red.
-TRACTION_CMAP = LinearSegmentedColormap.from_list(
-    "traction",
-    ["black", "blue", "cyan", "green", "yellow", "orange", "red"],
-)
-
 import openpiv.tools as piv_tools
-from piv import (
+from lib.piv import (
     QUIVER_LENGTH_FRACTION,
     QUIVER_WIDTH,
     SMOOTH_WINDOW,
@@ -34,9 +27,10 @@ from piv import (
     piv_fields_filename,
     save_video,
 )
-from traction import (
+from lib.traction import (
     DISPLACEMENT_SMOOTH_SIGMA,
     POISSON_RATIO,
+    TRACTION_CMAP,
     TRACTION_VMIN_PERCENTILE,
     YOUNGS_MODULUS,
     fttc_traction,
@@ -79,7 +73,17 @@ def render_combined_frame(
     cutoff: float | None = None,
     non_cumulative: bool = False,
     transparent: bool = False,
+    canvas_color: str = "auto",
+    arrow_width: float = QUIVER_WIDTH,
+    arrow_length_fraction: float = QUIVER_LENGTH_FRACTION,
+    arrow_color: str | None = None,
 ) -> np.ndarray:
+    """canvas_color controls the facecolor when show_background is False:
+    "auto" (default) keeps the original behavior — black if this is a
+    PIV-arrows-only render (piv_only below), white otherwise; "white"/"black"
+    force it regardless. arrow_color similarly defaults to the original
+    auto-contrast heuristic (None -> white on a black canvas, else black);
+    pass an explicit color to override."""
     # The microscope frame only sets the canvas size — stabilize.py
     # co-registers and crops it identically to the brightfield frame, so
     # both share the same (h, w) and the same PIV-grid coordinate system.
@@ -118,7 +122,10 @@ def render_combined_frame(
     # is meant to be transparent, since there's no opaque canvas to contrast
     # against.
     piv_only = show_piv and not show_background and not show_traction and not transparent_canvas
-    if piv_only:
+    is_black_canvas = not show_background and not transparent_canvas and (
+        canvas_color == "black" or (canvas_color == "auto" and piv_only)
+    )
+    if is_black_canvas:
         fig.patch.set_facecolor("black")
         ax.set_facecolor("black")
 
@@ -163,13 +170,17 @@ def render_combined_frame(
             vmax=stress_vmax,
         )
         stress_label = "traction stress (Pa)" if non_cumulative else "Δ traction stress (Pa)"
-        fig.colorbar(heat, ax=ax, label=stress_label, shrink=0.7, pad=0.02)
+        stress_cbar = fig.colorbar(heat, ax=ax, label=stress_label, shrink=0.7, pad=0.02)
+        if is_black_canvas:
+            stress_cbar.ax.set_facecolor("black")
+            stress_cbar.ax.yaxis.label.set_color("white")
+            stress_cbar.ax.tick_params(colors="white")
 
     if show_piv:
         # Same magnitude/scale = arrow length (in pixel units) calibration as
         # render_piv_frame — see QUIVER_LENGTH_FRACTION in piv.py.
         mesh_spacing = abs(x[0, 1] - x[0, 0])
-        quiver_scale = disp_vmax / (QUIVER_LENGTH_FRACTION * mesh_spacing)
+        quiver_scale = disp_vmax / (arrow_length_fraction * mesh_spacing)
         if color_piv_by_magnitude:
             # No traction heatmap competing for the colormap, so color arrows
             # by displacement magnitude (rainbow), as render_piv_frame does.
@@ -180,11 +191,12 @@ def render_combined_frame(
                 angles="xy",
                 scale_units="xy",
                 scale=quiver_scale,
-                width=QUIVER_WIDTH,
+                width=arrow_width,
             )
             quiver.set_clim(0, disp_vmax)
             cbar = fig.colorbar(quiver, ax=ax, label=f"displacement ({disp_unit})", shrink=0.7, pad=0.02)
-            if piv_only:
+            if is_black_canvas:
+                cbar.ax.set_facecolor("black")
                 cbar.ax.yaxis.label.set_color("white")
                 cbar.ax.tick_params(colors="white")
         else:
@@ -192,25 +204,28 @@ def render_combined_frame(
             # legible against the traction heatmap and the image
             # beneath it. Both fields are derived from the same displacement
             # measurement, so they represent the same instant and should
-            # visually correlate.
+            # visually correlate. arrow_color=None keeps the original
+            # auto-contrast heuristic; an explicit color overrides it.
             quiver = ax.quiver(
                 x, y, u, v,
-                color="white" if piv_only else "black",
+                color=arrow_color if arrow_color is not None else ("white" if is_black_canvas else "black"),
                 angles="xy",
                 scale_units="xy",
                 scale=quiver_scale,
-                width=QUIVER_WIDTH,
+                width=arrow_width,
             )
         qk = ax.quiverkey(
             quiver, X=0.83, Y=1.04, U=disp_vmax,
             label=f"{disp_vmax:.1f} {disp_unit} displacement", labelpos="E",
             coordinates="axes", fontproperties={"size": 8},
         )
-        if piv_only:
+        if is_black_canvas:
             qk.text.set_color("white")
 
     if title:
-        ax.set_title(title)
+        title_artist = ax.set_title(title)
+        if is_black_canvas:
+            title_artist.set_color("white")
 
     ax.set_aspect(1.)
     ax.set_xlim(0, w)
@@ -355,7 +370,7 @@ def main() -> None:
     # same displacement field, so a single cache covers either (or both) of
     # them.
     if show_piv or show_traction:
-        ensure_cache("piv.py", piv_fields_path, args.force,
+        ensure_cache("lib/piv.py", piv_fields_path, args.force,
                      ["--data-dir", str(data_dir)] +
                      (["--non-cumulative"] if args.non_cumulative else []))
 

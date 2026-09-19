@@ -145,37 +145,85 @@ def compute_piv(
 
 
 def render_piv_frame(
-    image_path: Path, x, y, u, v, vmin: float, vmax: float
+    image_path: Path, x, y, u, v, vmin: float, vmax: float,
+    background_mode: str = "white",
+    background_path: Path | None = None,
+    arrow_width: float = QUIVER_WIDTH,
+    arrow_length_fraction: float = QUIVER_LENGTH_FRACTION,
+    color_mode: str = "rainbow",
+    arrow_color: str = "black",
+    px_to_um: float | None = None,
 ) -> np.ndarray:
-    # Color each arrow by its displacement magnitude on a rainbow scale
-    # (cool = small/no motion, warm = large motion) instead of the default
-    # valid/invalid blue-red scheme — vmin/vmax are fixed across the whole
-    # video so colors stay comparable from frame to frame.
+    """color_mode "rainbow" (default) colors each arrow by its displacement
+    magnitude on a rainbow scale (cool = small/no motion, warm = large
+    motion) instead of the default valid/invalid blue-red scheme — vmin/vmax
+    are fixed across the whole video so colors stay comparable from frame to
+    frame; "solid" draws every arrow in arrow_color instead, with no
+    colorbar. background_mode "white" (default, matches the original
+    behavior) leaves the plain matplotlib canvas; "black" fills it opaque
+    black; "channel" draws background_path (e.g. a co-registered brightfield
+    frame) beneath the arrows."""
     im = piv_tools.imread(str(image_path))
     h, w = im.shape[:2]
     magnitude = np.sqrt(u ** 2 + v ** 2)
 
+    disp_unit = "px"
+    xd, yd, ud, vd = x, y, u, v
+    hd, wd = h, w
+    vmind, vmaxd, magnitude_d = vmin, vmax, magnitude
+    if px_to_um is not None:
+        hd, wd = h * px_to_um, w * px_to_um
+        xd, yd = x * px_to_um, y * px_to_um
+        ud, vd = u * px_to_um, v * px_to_um
+        vmind, vmaxd = vmin * px_to_um, vmax * px_to_um
+        magnitude_d = magnitude * px_to_um
+        disp_unit = "μm"
+
     # angles="xy"/scale_units="xy" draw arrows whose length is magnitude/scale
-    # in the same pixel units as x, y — see QUIVER_LENGTH_FRACTION above for
-    # why scale is derived from the grid spacing rather than fixed outright.
-    mesh_spacing = abs(x[0, 1] - x[0, 0])
-    quiver_scale = vmax / (QUIVER_LENGTH_FRACTION * mesh_spacing)
+    # in the same (possibly μm-converted) units as x, y — see
+    # QUIVER_LENGTH_FRACTION above for why scale is derived from the grid
+    # spacing rather than fixed outright.
+    mesh_spacing = abs(xd[0, 1] - xd[0, 0])
+    quiver_scale = vmaxd / (arrow_length_fraction * mesh_spacing)
 
     fig, ax = plt.subplots(figsize=(9.6, 7.2), dpi=300)
-    # ax.imshow(im,  extent=[0, w, 0, h])
-    quiver = ax.quiver(
-        x, y, u, v, magnitude,
-        cmap="rainbow",
-        angles="xy",
-        scale_units="xy",
-        scale=quiver_scale * 10,
-        width=QUIVER_WIDTH,
-    )
-    quiver.set_clim(vmin, vmax)
-    fig.colorbar(quiver, ax=ax, label="displacement (px)", shrink=0.8)
+
+    if background_mode == "black":
+        fig.patch.set_facecolor("black")
+        ax.set_facecolor("black")
+    elif background_mode == "channel" and background_path is not None:
+        bg = piv_tools.imread(str(background_path))
+        bg_vmin, bg_vmax = np.percentile(bg, (1, 99))
+        bg_norm = np.clip((bg.astype(float) - bg_vmin) / (bg_vmax - bg_vmin), 0, 1)
+        ax.imshow(bg_norm, extent=[0, wd, 0, hd], cmap="gray", vmin=0, vmax=1)
+
+    if color_mode == "solid":
+        ax.quiver(
+            xd, yd, ud, vd,
+            color=arrow_color,
+            angles="xy",
+            scale_units="xy",
+            scale=quiver_scale,
+            width=arrow_width,
+        )
+    else:
+        quiver = ax.quiver(
+            xd, yd, ud, vd, magnitude_d,
+            cmap="rainbow",
+            angles="xy",
+            scale_units="xy",
+            scale=quiver_scale,
+            width=arrow_width,
+        )
+        quiver.set_clim(vmind, vmaxd)
+        cbar = fig.colorbar(quiver, ax=ax, label=f"displacement ({disp_unit})", shrink=0.8)
+        if background_mode == "black":
+            cbar.ax.set_facecolor("black")
+            cbar.ax.yaxis.label.set_color("white")
+            cbar.ax.tick_params(colors="white")
     ax.set_aspect(1.)
-    ax.set_xlim(0, w)
-    ax.set_ylim(0, h)
+    ax.set_xlim(0, wd)
+    ax.set_ylim(0, hd)
     ax.axis("off")
 
     buf = io.BytesIO()

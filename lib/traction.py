@@ -6,15 +6,24 @@ import imageio.v3 as iio
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 from scipy.ndimage import gaussian_filter, uniform_filter1d
 
 import openpiv.tools as piv_tools
-from piv import (
+from lib.piv import (
     SMOOTH_WINDOW,
     ensure_cache,
     load_files,
     save_video,
+)
+
+# Black at the floor (below-threshold noise), then rainbow spectrum up to
+# red. Shared with piv_fttc.py's combined render (imported from here) so the
+# traction heatmap looks identical whether viewed standalone or overlaid.
+TRACTION_CMAP = LinearSegmentedColormap.from_list(
+    "traction",
+    ["black", "blue", "cyan", "green", "yellow", "orange", "red"],
 )
 
 # Substrate mechanical properties (user-supplied; needed to convert a
@@ -97,31 +106,58 @@ def fttc_traction(
 
 
 def render_traction_frame(
-    image_path: Path, x, y, tx, ty, vmin: float, vmax: float
+    image_path: Path, x, y, tx, ty, vmin: float, vmax: float,
+    background_mode: str = "white",
+    background_path: Path | None = None,
+    px_to_um: float | None = None,
 ) -> np.ndarray:
+    """background_mode "white" (default, matches the original behavior)
+    leaves the plain matplotlib canvas; "black" fills it opaque black;
+    "channel" draws background_path beneath a translucent heatmap. Traction
+    stress (Pa) is unit-independent of pixel size (see fttc_traction), so
+    px_to_um only rescales the spatial axes, not vmin/vmax."""
     im = piv_tools.imread(str(image_path))
     h, w = im.shape[:2]
     magnitude = np.sqrt(tx ** 2 + ty ** 2)
 
+    xd, yd = (x, y) if px_to_um is None else (x * px_to_um, y * px_to_um)
+    hd, wd = (h, w) if px_to_um is None else (h * px_to_um, w * px_to_um)
+
     fig, ax = plt.subplots(figsize=(9.6, 7.2), dpi=300)
+
+    show_channel_bg = background_mode == "channel" and background_path is not None
+    if background_mode == "black":
+        fig.patch.set_facecolor("black")
+        ax.set_facecolor("black")
+    elif show_channel_bg:
+        bg = piv_tools.imread(str(background_path))
+        bg_vmin, bg_vmax = np.percentile(bg, (1, 99))
+        bg_norm = np.clip((bg.astype(float) - bg_vmin) / (bg_vmax - bg_vmin), 0, 1)
+        ax.imshow(bg_norm, extent=[0, wd, 0, hd], cmap="gray", vmin=0, vmax=1)
+
     # imshow renders the field as a single smoothly-interpolated raster (the
     # PIV grid is regular) — unlike pcolormesh, there are no per-cell quad
     # edges to show through as a faint grid overlay, even with gouraud shading.
-    extent = [x.min(), x.max(), y.min(), y.max()]
+    extent = [xd.min(), xd.max(), yd.min(), yd.max()]
     origin = "upper" if y[0, 0] > y[-1, 0] else "lower"
     mesh = ax.imshow(
         magnitude,
         extent=extent,
         origin=origin,
-        cmap="rainbow",
+        cmap=TRACTION_CMAP,
         interpolation="bicubic",
         vmin=vmin,
         vmax=vmax,
+        alpha=0.35 if show_channel_bg else 1.0,
     )
-    fig.colorbar(mesh, ax=ax, label="Δ traction stress (Pa)", shrink=0.8)
+    cbar = fig.colorbar(mesh, ax=ax, label="Δ traction stress (Pa)", shrink=0.8)
+    if background_mode == "black":
+        cbar.ax.set_facecolor("black")
+        cbar.ax.yaxis.label.set_color("white")
+        cbar.ax.tick_params(colors="white")
     ax.set_aspect(1.)
-    ax.set_xlim(0, w)
-    ax.set_ylim(0, h)
+    ax.set_xlim(0, wd)
+    ax.set_ylim(0, hd)
     ax.axis("off")
 
     buf = io.BytesIO()
@@ -170,7 +206,7 @@ def main() -> None:
 
     traction_dir.mkdir(parents=True, exist_ok=True)
 
-    ensure_cache("piv.py", piv_fields_path, args.force,
+    ensure_cache("lib/piv.py", piv_fields_path, args.force,
                  ["--data-dir", str(data_dir)])
 
     files = load_files(data_dir)
