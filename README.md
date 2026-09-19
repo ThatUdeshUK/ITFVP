@@ -4,6 +4,18 @@ A Python pipeline for computing and visualising cell traction forces from fluore
 
 ---
 
+## Quick start
+
+```bash
+./run.sh
+```
+
+Installs `uv` if it isn't already on your `PATH`, runs `uv sync` to set up the
+virtual environment (only if `.venv/` doesn't exist yet), and launches the GUI
+(`uv run python main.py`). See [Setup](#setup) and [GUI](#gui) below for details.
+
+---
+
 ## Project structure
 
 ```
