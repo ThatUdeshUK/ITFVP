@@ -7,7 +7,9 @@ viewer/side-panel splitter, and the Export Video/Frames mixin.
 from __future__ import annotations
 
 import shutil
+import tempfile
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -91,6 +93,43 @@ def properties_group(state: AppState, key: str, title: str, *items: QWidget | QL
             item.setWordWrap(True)
     box.add(*items)
     return box
+
+
+def is_gapped_piv(state: AppState) -> bool:
+    """True once a PIV result has been computed with the "Gapped / large
+    displacement" preset — the raw-field CSV export (see
+    export_csv_archive) mirrors lib/gapped.py's own CSV exporters, which
+    assume that coarse-to-fine gapped-style displacement, so it's only
+    offered for a gapped computation."""
+    return bool(state.piv_meta and state.piv_meta.get("use_gapped_settings"))
+
+
+def export_csv_archive(
+    parent: QWidget,
+    dest: str,
+    n_pairs: int,
+    write_csv: Callable[[Path, int], None],
+) -> None:
+    """Write one CSV per frame pair (write_csv(tmp_dir, pair_index) creates
+    the file) into a temp directory, then zip it to dest — behind a
+    progress dialog. Used by the PIV/Traction tabs' "Export Computations"
+    action (see lib/gapped.py's export_displacement_csv/export_traction_csv,
+    called once per pair from piv_tab.py/traction_tab.py)."""
+    if dest.lower().endswith(".zip"):
+        dest = dest[:-4]
+
+    def job(progress):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            for i in range(n_pairs):
+                write_csv(tmp_dir, i)
+                progress(i + 1, n_pairs, f"Wrote CSV {i + 1}/{n_pairs}")
+            shutil.make_archive(dest, "zip", tmp_dir)
+
+    try:
+        run_with_progress(parent, job, "Exporting Computations", f"Writing {n_pairs} CSV file(s)...")
+    except RuntimeError as exc:
+        QMessageBox.critical(parent, "Export failed", str(exc))
 
 
 def action_splitter(main: QWidget, side: QWidget) -> QSplitter:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -17,10 +18,18 @@ from PySide6.QtWidgets import (
 )
 
 from lib import piv as _piv
+from lib.gapped import export_displacement_csv
 from .. import pipeline
 from ..state import AppState
 from ..widgets import ActionRunner, FrameViewer, RenderOptionsPanel
-from .tab_common import ExportMixin, action_splitter, properties_group, side_panel
+from .tab_common import (
+    ExportMixin,
+    action_splitter,
+    export_csv_archive,
+    is_gapped_piv,
+    properties_group,
+    side_panel,
+)
 
 
 class PIVTab(QWidget, ExportMixin):
@@ -63,6 +72,13 @@ class PIVTab(QWidget, ExportMixin):
         self.render_btn = QPushButton("Render")
         self.render_btn.clicked.connect(self._run_render)
 
+        self.export_computations_btn = QPushButton("Export Computations (.zip)...")
+        self.export_computations_btn.setToolTip(
+            "Exports the raw per-pair displacement field as CSV (one file per "
+            "frame pair) — only available for a Gapped-preset PIV computation."
+        )
+        self.export_computations_btn.clicked.connect(self._export_computations)
+
         self.runner = ActionRunner()
         self.runner.manage([self.compute_btn, self.render_btn])
 
@@ -74,6 +90,7 @@ class PIVTab(QWidget, ExportMixin):
             self.style_panel,
             self.render_btn,
             self._build_export_row(),
+            self.export_computations_btn,
             footer=self.runner,
         )
 
@@ -145,6 +162,7 @@ class PIVTab(QWidget, ExportMixin):
         self.compute_btn.setEnabled(has_stabilized and not busy)
         self.compute_btn.setText("Re-run PIV Computation" if has_piv else "Run PIV Computation")
         self.render_btn.setEnabled(has_piv and not busy)
+        self.export_computations_btn.setEnabled(has_piv and not busy and is_gapped_piv(self.state))
         # Re-applies the persisted collapsed/expanded state — needed on
         # project (re)load, since this tab is built once at startup before
         # any project is open (see properties_group in tab_common.py).
@@ -198,3 +216,27 @@ class PIVTab(QWidget, ExportMixin):
             self.runner.log_message("Rendering complete.")
 
         self.runner.run(job, on_done, "Rendering PIV timeline...", parent_for_errors=self)
+
+    def _export_computations(self) -> None:
+        if self.state.piv_result is None:
+            QMessageBox.warning(self, "No PIV result", "Run PIV computation first.")
+            return
+        result = self.state.piv_result
+        files = list(self.state.stabilized_files)
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Export PIV computations as zip",
+            str(Path.home() / "piv_displacement_csv.zip"), "Zip Archive (*.zip)",
+        )
+        if not dest:
+            return
+        px_to_um = self.state.render_settings.px_to_um()
+        n_pairs = len(result.u_smooth)
+
+        def write_csv(tmp_dir: Path, i: int) -> None:
+            name = f"{files[i].stem}_to_{files[i + 1].stem}_displacement.csv"
+            export_displacement_csv(
+                tmp_dir / name, result.x, result.y, result.u_smooth[i], result.v_smooth[i],
+                grid_mean=1, px_to_um=px_to_um,
+            )
+
+        export_csv_archive(self, dest, n_pairs, write_csv)

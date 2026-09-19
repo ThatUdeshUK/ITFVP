@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
+    QFileDialog,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -16,10 +17,18 @@ from PySide6.QtWidgets import (
 )
 
 from lib import traction as _traction
+from lib.gapped import export_traction_csv
 from .. import pipeline
 from ..state import AppState
 from ..widgets import ActionRunner, FrameViewer, RenderOptionsPanel
-from .tab_common import ExportMixin, action_splitter, properties_group, side_panel
+from .tab_common import (
+    ExportMixin,
+    action_splitter,
+    export_csv_archive,
+    is_gapped_piv,
+    properties_group,
+    side_panel,
+)
 
 
 class TractionTab(QWidget, ExportMixin):
@@ -61,6 +70,13 @@ class TractionTab(QWidget, ExportMixin):
         self.render_btn = QPushButton("Render")
         self.render_btn.clicked.connect(self._run_render)
 
+        self.export_computations_btn = QPushButton("Export Computations (.zip)...")
+        self.export_computations_btn.setToolTip(
+            "Exports the raw per-pair traction stress field as CSV (one file per "
+            "frame pair) — only available for a Gapped-preset PIV computation."
+        )
+        self.export_computations_btn.clicked.connect(self._export_computations)
+
         self.runner = ActionRunner()
         self.runner.manage([self.compute_btn, self.render_btn])
 
@@ -72,6 +88,7 @@ class TractionTab(QWidget, ExportMixin):
             self.style_panel,
             self.render_btn,
             self._build_export_row(),
+            self.export_computations_btn,
             footer=self.runner,
         )
 
@@ -102,6 +119,7 @@ class TractionTab(QWidget, ExportMixin):
         self.compute_btn.setEnabled(has_piv and not busy)
         self.compute_btn.setText("Re-run Traction" if has_traction else "Run Traction")
         self.render_btn.setEnabled(has_traction and not busy)
+        self.export_computations_btn.setEnabled(has_traction and not busy and is_gapped_piv(self.state))
         self.computation_group.set_expanded(self.state.is_group_expanded("traction.computation"))
         self.style_panel.refresh()
 
@@ -151,3 +169,28 @@ class TractionTab(QWidget, ExportMixin):
             self.runner.log_message("Rendering complete.")
 
         self.runner.run(job, on_done, "Rendering traction timeline...", parent_for_errors=self)
+
+    def _export_computations(self) -> None:
+        if self.state.traction_result is None:
+            QMessageBox.warning(self, "No traction result", "Run traction computation first.")
+            return
+        result = self.state.traction_result
+        piv_result = self.state.piv_result
+        files = list(self.state.stabilized_files)
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Export traction computations as zip",
+            str(Path.home() / "traction_stress_csv.zip"), "Zip Archive (*.zip)",
+        )
+        if not dest:
+            return
+        px_to_um = self.state.render_settings.px_to_um()
+        n_pairs = len(result.tx_smooth)
+
+        def write_csv(tmp_dir: Path, i: int) -> None:
+            name = f"{files[i].stem}_to_{files[i + 1].stem}_traction.csv"
+            export_traction_csv(
+                tmp_dir / name, piv_result.x, piv_result.y, result.tx_smooth[i], result.ty_smooth[i],
+                grid_mean=1, px_to_um=px_to_um,
+            )
+
+        export_csv_archive(self, dest, n_pairs, write_csv)
